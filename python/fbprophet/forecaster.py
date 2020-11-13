@@ -92,10 +92,13 @@ class Prophet(object):
             mcmc_samples=0,
             interval_width=0.80,
             uncertainty_samples=1000,
-            stan_backend=None
+            stan_backend=None,
+            growth_bound=None,
+            growth_arr=None
     ):
         self.growth = growth
-
+        self.growth_arr = growth_arr
+        self.growth_bound = growth_bound
         self.changepoints = changepoints
         if self.changepoints is not None:
             self.changepoints = pd.Series(pd.to_datetime(self.changepoints), name='ds')
@@ -1001,10 +1004,12 @@ class Prophet(object):
         A tuple (k, m) with the rate (k) and offset (m) of the linear growth
         function.
         """
+
         i0, i1 = df['ds'].idxmin(), df['ds'].idxmax()
         T = df['t'].iloc[i1] - df['t'].iloc[i0]
         k = (df['y_scaled'].iloc[i1] - df['y_scaled'].iloc[i0]) / T
         m = df['y_scaled'].iloc[i0] - k * df['t'].iloc[i0]
+
         return (k, m)
 
     @staticmethod
@@ -1050,7 +1055,7 @@ class Prophet(object):
         return (k, m)
 
     @staticmethod
-    def flat_growth_init(df):
+    def flat_growth_init(df, growth_bound, y_scale):
         """Initialize flat growth.
 
         Provides a strong initialization for flat growth. Sets the growth to 0
@@ -1066,8 +1071,15 @@ class Prophet(object):
         A tuple (k, m) with the rate (k) and offset (m) of the linear growth
         function.
         """
-        k = 0
-        m = df['y_scaled'].mean()
+        if growth_bound is not None:
+            growth_bound[0] = (growth_bound[0] - df['floor'].mean()) / y_scale
+            growth_bound[1] = (growth_bound[1] - df['floor'].mean()) / y_scale
+            k = growth_bound[0]
+            m = growth_bound[1]
+        else:
+            k = 0
+            m = df['y_scaled'].mean()
+
         return k, m
 
     def fit(self, df, **kwargs):
@@ -1141,7 +1153,7 @@ class Prophet(object):
             kinit = self.linear_growth_init(history)
         elif self.growth == 'flat':
             dat['cap'] = np.zeros(self.history.shape[0])
-            kinit = self.flat_growth_init(history)
+            kinit = self.flat_growth_init(history, self.growth_bound, self.y_scale)
         else:
             dat['cap'] = history['cap_scaled']
             kinit = self.logistic_growth_init(history)
@@ -1281,7 +1293,7 @@ class Prophet(object):
         return cap / (1 + np.exp(-k_t * (t - m_t)))
 
     @staticmethod
-    def flat_trend(t, m):
+    def flat_trend(t, m, growth_arr, df, y_scale):
         """Evaluate the flat trend function.
 
         Parameters
@@ -1293,7 +1305,16 @@ class Prophet(object):
         -------
         Vector y(t).
         """
-        m_t = m * np.ones_like(t)
+        if growth_arr is not None:
+            growth_arr = (growth_arr - df['floor'].mean())/y_scale
+            #if growth_arr.shape[0] == 2
+            m_t = np.linspace(growth_arr[0],growth_arr[1],t.shape[0])
+        else:
+            if 'trend_constr' in df.columns:
+                growth_arr = (df['trend_constr'] - df['floor'].mean()) / y_scale
+                m_t = growth_arr.values
+            else:
+                m_t = m * np.ones_like(t)
         return m_t
 
     def predict_trend(self, df):
@@ -1320,7 +1341,7 @@ class Prophet(object):
                 t, cap, deltas, k, m, self.changepoints_t)
         elif self.growth == 'flat':
             # constant trend
-            trend = self.flat_trend(t, m)
+            trend = self.flat_trend(t, m, self.growth_arr, df, self.y_scale)
 
         return trend * self.y_scale + df['floor']
 
@@ -1525,7 +1546,7 @@ class Prophet(object):
             trend = self.piecewise_logistic(t, cap, deltas, k, m,
                                             changepoint_ts)
         elif self.growth == 'flat':
-            trend = self.flat_trend(t, m)
+            trend = self.flat_trend(t, m, self.growth_arr, df, self.y_scale)
 
         return trend * self.y_scale + df['floor']
 
